@@ -1,6 +1,5 @@
 #include "gtom/include/Prerequisites.cuh"
 
-
 namespace gtom
 {
 	////////////////////////////
@@ -8,13 +7,14 @@ namespace gtom
 	////////////////////////////
 
 	__global__ void Bin1DKernel(tfloat* d_input, tfloat* d_output, size_t elements, int binsize);
-#if __CUDACC_VER_MAJOR__ >= 12
-	__global__ void Bin2DKernel(tfloat* d_output, int width, cudaTextureObject_t texObj);
-#else
-	__global__ void Bin2DKernel(tfloat* d_output, int width);
-#endif
-	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize);
 
+#if __CUDACC_VER_MAJOR__ < 12
+	template <class T> __global__ void Bin2DKernel(T* d_output, int width);
+#else
+	template <class T> __global__ void Bin2DKernel(T* d_output, int width, cudaTextureObject_t texInput2d_obj);
+#endif
+
+	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize);
 
 	///////////
 	//Globals//
@@ -22,127 +22,89 @@ namespace gtom
 
 #if __CUDACC_VER_MAJOR__ < 12
 	texture<tfloat, 2> texInput2d;
+	#define TEX_INPUT2D(x, y) tex2D(texInput2d, x, y)
+#else
+	#define TEX_INPUT2D(x, y) tex2D<float>(texInput2d_obj, x, y)
 #endif
 
 	/////////////////////////////////////
 	//Binning with linear interpolation//
 	/////////////////////////////////////
 
-	void d_Bin(tfloat* d_input, tfloat* d_output, int3 dims, int bincount, int batch)
+	template <class T> void d_Bin2D(T* d_input, T* d_output, int2 dims, int bincount)
 	{
-		for (int b = 0; b < batch; b++)
+		T* d_intermediate = NULL;
+
+#if __CUDACC_VER_MAJOR__ < 12
+		texInput2d.normalized = false;
+		texInput2d.filterMode = cudaFilterModeLinear;
+#else
+		cudaTextureObject_t texInput2d_obj;
+#endif
+
+		size_t elements = dims.x * dims.y;
+		size_t binnedelements = dims.x * dims.y / (1 << (bincount * 2));
+
+		for (int i = 0; i < bincount; i++)
 		{
-			tfloat* d_intermediate = NULL;
+			tfloat* d_result;
+			if (i < bincount - 1)
+				cudaMalloc((void**)&d_result, dims.x / (2 << i) * dims.y / (2 << i) * sizeof(tfloat));
+			else
+				d_result = d_output + binnedelements;
 
-			if (dims.z <= 1 && dims.y <= 1)	//1D
-			{
-				int TpB = min(192, dims.x / (1 << bincount));
-				int totalblocks = min((dims.x / (1 << bincount) + TpB - 1) / TpB, 32768);
-				dim3 grid = dim3((uint)totalblocks);
+#if __CUDACC_VER_MAJOR__ < 12
+			cudaChannelFormatDesc desc = cudaCreateChannelDesc<tfloat>();
+			cudaBindTexture2D(NULL,
+				texInput2d,
+				i == 0 ? d_input : d_intermediate,
+				desc,
+				dims.x / (2 << i),
+				dims.y / (2 << i),
+				(dims.x / (2 << i)) * sizeof(tfloat));
 
-				size_t elements = dims.x;
-				size_t binnedelements = dims.x / (1 << bincount);
+			int TpB = min(256, dims.x / (2 << i));
+			int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
+			dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
 
-				Bin1DKernel<<<grid, (uint)TpB>>>(d_input + elements * b, d_output + binnedelements * b, dims.x / (1 << bincount), 1 << bincount);
-			}
-			else if (dims.z <= 1)			//2D
-			{
-				if (bincount > 1)
-					cudaMalloc((void**)&d_intermediate, dims.x * dims.y / 4 * sizeof(tfloat));
+			Bin2DKernel << <grid, (uint)TpB >> > (d_result, dims.x / (2 << i));
 
-#if __CUDACC_VER_MAJOR__ >= 12
-				// Create Texture Object
-				cudaArray_t cuArray;
-				cudaChannelFormatDesc desc = cudaCreateChannelDesc<tfloat>();
-				cudaMallocArray(&cuArray, &desc, dims.x, dims.y);
-				cudaMemcpy2DToArray(cuArray, 0, 0, d_input + b * dims.x * dims.y, dims.x * sizeof(tfloat), dims.x * sizeof(tfloat), dims.y, cudaMemcpyDeviceToDevice);
-
-				cudaResourceDesc resDesc = {};
-				resDesc.resType = cudaResourceTypeArray;
-				resDesc.res.array.array = cuArray;
-
-				cudaTextureDesc texDesc = {};
-				texDesc.addressMode[0] = cudaAddressModeClamp;
-				texDesc.addressMode[1] = cudaAddressModeClamp;
-				texDesc.filterMode = cudaFilterModeLinear;
-				texDesc.readMode = cudaReadModeElementType;
-				texDesc.normalizedCoords = false;
-
-				cudaTextureObject_t texInput2dObj;
-				cudaCreateTextureObject(&texInput2dObj, &resDesc, &texDesc, nullptr);
+			cudaUnbindTexture(texInput2d);
 #else
-				texInput2d.normalized = false;
-				texInput2d.filterMode = cudaFilterModeLinear;
+			cudaResourceDesc resDesc{};
+			resDesc.resType = cudaResourceTypePitch2D;
+			resDesc.res.pitch2D.devPtr = i == 0 ? d_input : d_intermediate;
+			resDesc.res.pitch2D.pitchInBytes = (dims.x / (2 << i)) * sizeof(tfloat);
+			resDesc.res.pitch2D.width = dims.x / (2 << i);
+			resDesc.res.pitch2D.height = dims.y / (2 << i);
+			resDesc.res.pitch2D.desc = cudaCreateChannelDesc<tfloat>();
+
+			cudaTextureDesc texDesc{};
+			texDesc.addressMode[0] = cudaAddressModeClamp;
+			texDesc.addressMode[1] = cudaAddressModeClamp;
+			texDesc.filterMode = cudaFilterModeLinear;
+			texDesc.readMode = cudaReadModeElementType;
+			texDesc.normalizedCoords = 0;
+
+			cudaCreateTextureObject(&texInput2d_obj, &resDesc, &texDesc, nullptr);
+
+			int TpB = min(256, dims.x / (2 << i));
+			int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
+			dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
+
+			Bin2DKernel << <grid, (uint)TpB >> > (d_result, dims.x / (2 << i), texInput2d_obj);
+
+			cudaDestroyTextureObject(texInput2d_obj);
 #endif
 
-				size_t elements = dims.x * dims.y;
-				size_t binnedelements = dims.x * dims.y / (1 << (bincount * 2));
-
-				for (int i = 0; i < bincount; i++)
-				{
-					int TpB = min(256, dims.x / (2 << i));
-					int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
-					dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
-
-					tfloat* d_result;
-					if (i < bincount - 1)
-						cudaMalloc((void**)&d_result, dims.x / (2 << i) * dims.y / (2 << i) * sizeof(tfloat));
-					else
-						d_result = d_output + binnedelements * b;
-
-#if __CUDACC_VER_MAJOR__ >= 12
-					Bin2DKernel<<<grid, (uint)TpB>>>(d_result, dims.x / (2 << i), texInput2dObj);
-#else
-					Bin2DKernel<<<grid, (uint)TpB>>>(d_result, dims.x / (2 << i));
-#endif
-
-#if __CUDACC_VER_MAJOR__ >= 12
-					if (d_result != d_output + binnedelements * b)
-					{
-						if (d_intermediate != NULL)
-							cudaFree(d_intermediate);
-						d_intermediate = d_result;
-					}
-#else
-					cudaUnbindTexture(texInput2d);
-					if (d_result != d_output + binnedelements * b)
-					{
-						if (d_intermediate != NULL)
-							cudaFree(d_intermediate);
-						d_intermediate = d_result;
-					}
-#endif
-				}
-
-#if __CUDACC_VER_MAJOR__ >= 12
-				cudaDestroyTextureObject(texInput2dObj);
-				cudaFreeArray(cuArray);
-#endif
-			}
-			else							//3D
+			if (d_result != d_output + binnedelements)
 			{
-				int TpB = min(192, dims.x / (1 << bincount));
-				int totalblocks = min((dims.x / (1 << bincount) + TpB - 1) / TpB, 32768);
-				dim3 grid = dim3((uint)totalblocks, dims.y / (1 << bincount), dims.z / (1 << bincount));
-
-				size_t elements = dims.x * dims.y * dims.z;
-				size_t binnedelements = dims.x * dims.y * dims.z / (1 << (bincount * 3));
-
-				Bin3DKernel<<<grid, (uint)TpB>>>(
-					d_input + elements * b,
-					d_output + binnedelements * b,
-					dims.x,
-					dims.y,
-					dims.x / (1 << bincount),
-					dims.y / (1 << bincount),
-					1 << bincount);
+				if (d_intermediate != NULL)
+					cudaFree(d_intermediate);
+				d_intermediate = d_result;
 			}
-
-			if (d_intermediate != NULL)
-				cudaFree(d_intermediate);
 		}
 	}
-
 
 	////////////////
 	//CUDA kernels//
@@ -154,49 +116,48 @@ namespace gtom
 			id < elements;
 			id += blockDim.x * gridDim.x)
 		{
-			tfloat binsum = (tfloat)0;
+			tfloat binsum = 0;
 			for (int i = 0; i < binsize; i++)
 				binsum += d_input[id * binsize + i];
 			d_output[id] = binsum / (tfloat)binsize;
 		}
 	}
 
-#if __CUDACC_VER_MAJOR__ >= 12
-	__global__ void Bin2DKernel(tfloat* d_output, int width, cudaTextureObject_t texObj)
+#if __CUDACC_VER_MAJOR__ < 12
+	template <class T> __global__ void Bin2DKernel(T* d_output, int width)
 #else
-	__global__ void Bin2DKernel(tfloat* d_output, int width)
+	template <class T> __global__ void Bin2DKernel(T* d_output, int width, cudaTextureObject_t texInput2d_obj)
 #endif
 	{
 		for (int x = blockIdx.x * blockDim.x + threadIdx.x;
 			x < width;
 			x += blockDim.x * gridDim.x)
-#if __CUDACC_VER_MAJOR__ >= 12
-			d_output[blockIdx.y * width + x] = tex2D<tfloat>(texObj, (float)(x * 2 + 1), (float)(blockIdx.y * 2 + 1));
-#else
-			d_output[blockIdx.y * width + x] = tex2D(texInput2d, (float)(x * 2 + 1), (float)(blockIdx.y * 2 + 1));
-#endif
+			d_output[blockIdx.y * width + x] = TEX_INPUT2D((float)(x * 2 + 1), (float)(blockIdx.y * 2 + 1));
 	}
 
 	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize)
 	{
-		int binvolume = binsize * binsize * binsize;
-		for (int x = blockIdx.x * blockDim.x + threadIdx.x;
-			x < binnedwidth;
-			x += blockDim.x * gridDim.x)
-		{
-			tfloat binsum = (tfloat)0;
-			for (int bz = 0; bz < binsize; bz++)
-			{
-				int offsetz = blockIdx.z * binsize + bz;
-				for (int by = 0; by < binsize; by++)
-				{
-					int offsety = blockIdx.y * binsize + by;
-					for (int bx = 0; bx < binsize; bx++)
-						binsum += d_input[(offsetz * height + offsety) * width + x * binsize + bx];
-				}
-			}
+		int x = threadIdx.x + blockIdx.x * blockDim.x;
+		if (x >= binnedwidth)
+			return;
 
+		for (int y = 0; y < binnedheight; y++)
+		{
+			tfloat binsum = 0;
+			int binvolume = 0;
+			for (int dz = 0; dz < binsize; dz++)
+				for (int dy = 0; dy < binsize; dy++)
+				{
+					int xi = x * binsize + dz;
+					int yi = y * binsize + dy;
+					if (xi < width && yi < height)
+					{
+						binsum += d_input[yi * width + xi];
+						binvolume++;
+					}
+				}
 			d_output[(blockIdx.z * binnedheight + blockIdx.y) * binnedwidth + x] = binsum / (tfloat)binvolume;
 		}
 	}
 }
+
