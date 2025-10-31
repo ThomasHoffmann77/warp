@@ -9,7 +9,6 @@ namespace gtom
 	//CUDA kernel declarations//
 	////////////////////////////
 
-	//Kernel for applying an irregular spherical mask to the input
 	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center
 #if __CUDACC_VER_MAJOR__ >= 12
 		, cudaTextureObject_t texIrregularSphereRadius2d_obj
@@ -170,7 +169,7 @@ namespace gtom
 
 			//Write masked input to output
 			d_output[offset + idx] = maskvalue * d_input[offset + idx];
-			//d_output[offset + idx] = radius;		
+			//d_output[offset + idx] = radius;
 		}
 	}
 }
