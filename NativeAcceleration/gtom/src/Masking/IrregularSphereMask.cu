@@ -8,6 +8,7 @@ namespace gtom
 	//CUDA kernel declarations//
 	////////////////////////////
 
+	//Kernel for applying an irregular spherical mask to the input
 	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center
 #if __CUDACC_VER_MAJOR__ >= 12
 		, cudaTextureObject_t texIrregularSphereRadius2d_obj
@@ -19,6 +20,7 @@ namespace gtom
 	///////////
 
 #if __CUDACC_VER_MAJOR__ < 12
+	//Texture for radius map (2D) used for irregular sphere masking
 	static texture<tfloat, 2, cudaReadModeElementType> texIrregularSphereRadius2d;  //added static in order to allow parallel builds
 	#define TEX_RADIUS(phi, theta) tex2D(texIrregularSphereRadius2d, phi, theta)
 #else
@@ -29,6 +31,7 @@ namespace gtom
 	//Host methods//
 	///////////////
 
+	//Host function to apply irregular spherical mask to a batch of inputs
 	template <class T> void d_IrregularSphereMask(T* d_input,
 		T* d_output,
 		int3 dims,
@@ -38,6 +41,7 @@ namespace gtom
 		tfloat3* center,
 		int batch)
 	{
+		//Copy radius map to pitched device memory for 2D texture binding
 		tfloat* d_pitched = NULL;
 		int pitchedwidth = anglesteps.x * sizeof(tfloat);
 		d_pitched = (tfloat*)CudaMallocAligned2D(anglesteps.x * sizeof(tfloat), anglesteps.y, &pitchedwidth);
@@ -48,6 +52,7 @@ namespace gtom
 				cudaMemcpyDeviceToDevice);
 
 #if __CUDACC_VER_MAJOR__ < 12
+		//Bind radius texture
 		texIrregularSphereRadius2d.normalized = true;
 		texIrregularSphereRadius2d.filterMode = cudaFilterModeLinear;
 		texIrregularSphereRadius2d.addressMode[0] = cudaAddressModeMirror;
@@ -62,6 +67,7 @@ namespace gtom
 			anglesteps.y,
 			pitchedwidth);
 #else
+		//CUDA >=12 texture object setup
 		cudaResourceDesc resDesc{};
 		resDesc.resType = cudaResourceTypePitch2D;
 		resDesc.res.pitch2D.devPtr = d_pitched;
@@ -81,8 +87,10 @@ namespace gtom
 		cudaCreateTextureObject(&texIrregularSphereRadius2d_obj, &resDesc, &texDesc, nullptr);
 #endif
 
+		//Determine center of mask
 		tfloat3 _center = center != NULL ? *center : tfloat3(dims.x / 2, dims.y / 2, dims.z / 2);
 
+		//Launch kernel
 		int TpB = min(NextMultipleOf(dims.x, 32), 256);
 		dim3 grid = dim3(dims.y, dims.z, batch);
 		if (DimensionCount(dims) <= 2)
@@ -99,34 +107,41 @@ namespace gtom
 				);
 
 #if __CUDACC_VER_MAJOR__ < 12
+		//Unbind texture
 		cudaUnbindTexture(texIrregularSphereRadius2d);
 #else
+		//Destroy texture object
 		cudaDestroyTextureObject(texIrregularSphereRadius2d_obj);
 #endif
 		cudaFree(d_pitched);
 	}
 
+	//Explicit instantiation for float type
 	template void d_IrregularSphereMask<tfloat>(tfloat* d_input, tfloat* d_output, int3 dims, tfloat* d_radiusmap, int2 anglesteps, tfloat sigma, tfloat3* center, int batch);
 
 	////////////////
 	//CUDA kernels//
 	////////////////
 
+	//Kernel to apply irregular spherical mask per element
 	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center
 #if __CUDACC_VER_MAJOR__ >= 12
 		, cudaTextureObject_t texIrregularSphereRadius2d_obj
 #endif
 	)
 	{
+		//Exit threads outside X dimension
 		if (threadIdx.x >= dims.x)
 			return;
 
+		//Calculate offset for batch mode
 		int offset = blockIdx.z * Elements(dims) + blockIdx.y * dims.x * dims.y + blockIdx.x * dims.x;
 
 		int x, y, z;
 		float length;
 		T maskvalue;
 
+		//Compute squared distance from center in Y and Z
 		y = blockIdx.x - center.y;
 		if (ndims > 2)
 			z = blockIdx.y - center.z;
@@ -137,28 +152,35 @@ namespace gtom
 		{
 			x = idx - center.x;
 
+			//Compute distance to center
 			length = sqrt((float)(x * x + y * y + z * z));
 
+			//Compute spherical coordinates
 			glm::vec3 direction((float)x / length, (float)y / length, (float)z / length);
 			float theta = acos((float)(-direction.x));
 			float phi = atan2((float)direction.y / sin(theta), (float)direction.z / sin(theta));
 
+			//Sample radius from texture
 			tfloat radius = TEX_RADIUS(phi, theta);
 
+			//Determine mask value
 			if (length < radius)
 				maskvalue = 1;
 			else
 			{
+				//Smooth border if sigma > 0
 				if (sigma > (tfloat)0)
 				{
 					maskvalue = exp(-((length - radius) * (length - radius) / (sigma * sigma)));
 					if (maskvalue < (tfloat)0.1353)
 						maskvalue = 0;
 				}
+				//Hard border
 				else
 					maskvalue = max((T)1 - (length - radius), (T)0);
 			}
 
+			//Write masked input to output
 			d_output[offset + idx] = maskvalue * d_input[offset + idx];
 		}
 	}
