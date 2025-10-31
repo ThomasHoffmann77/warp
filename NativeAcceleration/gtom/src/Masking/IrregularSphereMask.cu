@@ -19,7 +19,7 @@ namespace gtom
 	///////////
 
 #if __CUDACC_VER_MAJOR__ < 12
-	texture<tfloat, 2, cudaReadModeElementType> texIrregularSphereRadius2d;
+	static texture<tfloat, 2, cudaReadModeElementType> texIrregularSphereRadius2d;  //added static in order to allow parallel builds
 	#define TEX_RADIUS(phi, theta) tex2D(texIrregularSphereRadius2d, phi, theta)
 #else
 	#define TEX_RADIUS(phi, theta) tex2D<tfloat>(texIrregularSphereRadius2d_obj, phi, theta)
