@@ -31,11 +31,13 @@ namespace gtom
 	//Binning with linear interpolation//
 	/////////////////////////////////////
 
+	//2D binning helper function
 	template <class T> void d_Bin2D(T* d_input, T* d_output, int2 dims, int bincount)
 	{
 		T* d_intermediate = NULL;
 
 #if __CUDACC_VER_MAJOR__ < 12
+		//Bind 2D texture for linear interpolation
 		texInput2d.normalized = false;
 		texInput2d.filterMode = cudaFilterModeLinear;
 #else
@@ -47,6 +49,7 @@ namespace gtom
 
 		for (int i = 0; i < bincount; i++)
 		{
+			//Allocate intermediate results for multi-stage binning
 			tfloat* d_result;
 			if (i < bincount - 1)
 				cudaMalloc((void**)&d_result, dims.x / (2 << i) * dims.y / (2 << i) * sizeof(tfloat));
@@ -54,6 +57,7 @@ namespace gtom
 				d_result = d_output + binnedelements;
 
 #if __CUDACC_VER_MAJOR__ < 12
+			//Bind texture to current stage data
 			cudaChannelFormatDesc desc = cudaCreateChannelDesc<tfloat>();
 			cudaBindTexture2D(NULL,
 				texInput2d,
@@ -63,6 +67,7 @@ namespace gtom
 				dims.y / (2 << i),
 				(dims.x / (2 << i)) * sizeof(tfloat));
 
+			//Launch 2D binning kernel
 			int TpB = min(256, dims.x / (2 << i));
 			int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
 			dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
@@ -71,6 +76,7 @@ namespace gtom
 
 			cudaUnbindTexture(texInput2d);
 #else
+			//CUDA >= 12 texture object setup
 			cudaResourceDesc resDesc{};
 			resDesc.resType = cudaResourceTypePitch2D;
 			resDesc.res.pitch2D.devPtr = i == 0 ? d_input : d_intermediate;
@@ -97,6 +103,7 @@ namespace gtom
 			cudaDestroyTextureObject(texInput2d_obj);
 #endif
 
+			//Swap intermediate buffers
 			if (d_result != d_output + binnedelements)
 			{
 				if (d_intermediate != NULL)
@@ -110,6 +117,7 @@ namespace gtom
 	//CUDA kernels//
 	////////////////
 
+	//1D binning kernel
 	__global__ void Bin1DKernel(tfloat* d_input, tfloat* d_output, size_t elements, int binsize)
 	{
 		for (size_t id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -123,6 +131,7 @@ namespace gtom
 		}
 	}
 
+	//2D binning kernel
 #if __CUDACC_VER_MAJOR__ < 12
 	template <class T> __global__ void Bin2DKernel(T* d_output, int width)
 #else
@@ -135,6 +144,7 @@ namespace gtom
 			d_output[blockIdx.y * width + x] = TEX_INPUT2D((float)(x * 2 + 1), (float)(blockIdx.y * 2 + 1));
 	}
 
+	//3D binning kernel
 	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize)
 	{
 		int x = threadIdx.x + blockIdx.x * blockDim.x;
@@ -156,8 +166,8 @@ namespace gtom
 						binvolume++;
 					}
 				}
+			//Normalize by total elements in the bin
 			d_output[(blockIdx.z * binnedheight + blockIdx.y) * binnedwidth + x] = binsum / (tfloat)binvolume;
 		}
 	}
 }
-
