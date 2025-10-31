@@ -9,7 +9,7 @@ namespace gtom
 	__global__ void Bin1DKernel(tfloat* d_input, tfloat* d_output, size_t elements, int binsize);
 
 #if __CUDACC_VER_MAJOR__ < 12
-	template <class T> __global__ void Bin2DKernel(T* d_output, int width);
+	static template <class T> __global__ void Bin2DKernel(T* d_output, int width);   //added static in order to allow parallel builds
 #else
 	template <class T> __global__ void Bin2DKernel(T* d_output, int width, cudaTextureObject_t texInput2d_obj);
 #endif
