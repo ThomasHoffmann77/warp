@@ -1,5 +1,6 @@
 #include "gtom/include/Prerequisites.cuh"
 
+
 namespace gtom
 {
 	////////////////////////////
@@ -7,25 +8,15 @@ namespace gtom
 	////////////////////////////
 
 	__global__ void Bin1DKernel(tfloat* d_input, tfloat* d_output, size_t elements, int binsize);
-
-#if __CUDACC_VER_MAJOR__ < 12
-	static template <class T> __global__ void Bin2DKernel(T* d_output, int width);   //added static in order to allow parallel builds
-#else
 	template <class T> __global__ void Bin2DKernel(T* d_output, int width, cudaTextureObject_t texInput2d_obj);
-#endif
-
 	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize);
 
 	///////////
 	//Globals//
 	///////////
 
-#if __CUDACC_VER_MAJOR__ < 12
-	texture<tfloat, 2> texInput2d;
-	#define TEX_INPUT2D(x, y) tex2D(texInput2d, x, y)
-#else
+	// Textur-Makro für CUDA12+
 	#define TEX_INPUT2D(x, y) tex2D<float>(texInput2d_obj, x, y)
-#endif
 
 	/////////////////////////////////////
 	//Binning with linear interpolation//
@@ -34,13 +25,6 @@ namespace gtom
 	template <class T> void d_Bin2D(T* d_input, T* d_output, int2 dims, int bincount)
 	{
 		T* d_intermediate = NULL;
-
-#if __CUDACC_VER_MAJOR__ < 12
-		texInput2d.normalized = false;
-		texInput2d.filterMode = cudaFilterModeLinear;
-#else
-		cudaTextureObject_t texInput2d_obj;
-#endif
 
 		size_t elements = dims.x * dims.y;
 		size_t binnedelements = dims.x * dims.y / (1 << (bincount * 2));
@@ -53,25 +37,8 @@ namespace gtom
 			else
 				d_result = d_output + binnedelements;
 
-#if __CUDACC_VER_MAJOR__ < 12
-			cudaChannelFormatDesc desc = cudaCreateChannelDesc<tfloat>();
-			cudaBindTexture2D(NULL,
-				texInput2d,
-				i == 0 ? d_input : d_intermediate,
-				desc,
-				dims.x / (2 << i),
-				dims.y / (2 << i),
-				(dims.x / (2 << i)) * sizeof(tfloat));
-
-			int TpB = min(256, dims.x / (2 << i));
-			int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
-			dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
-
-			Bin2DKernel << <grid, (uint)TpB >> > (d_result, dims.x / (2 << i));
-
-			cudaUnbindTexture(texInput2d);
-#else
 			//CUDA >= 12 texture object setup
+			cudaTextureObject_t texInput2d_obj;
 			cudaResourceDesc resDesc{};
 			resDesc.resType = cudaResourceTypePitch2D;
 			resDesc.res.pitch2D.devPtr = i == 0 ? d_input : d_intermediate;
@@ -93,10 +60,9 @@ namespace gtom
 			int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
 			dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
 
-			Bin2DKernel << <grid, (uint)TpB >> > (d_result, dims.x / (2 << i), texInput2d_obj);
+			Bin2DKernel<<<grid, (uint)TpB>>>(d_result, dims.x / (2 << i), texInput2d_obj);
 
 			cudaDestroyTextureObject(texInput2d_obj);
-#endif
 
 			if (d_result != d_output + binnedelements)
 			{
@@ -124,11 +90,7 @@ namespace gtom
 		}
 	}
 
-#if __CUDACC_VER_MAJOR__ < 12
-	template <class T> __global__ void Bin2DKernel(T* d_output, int width)
-#else
 	template <class T> __global__ void Bin2DKernel(T* d_output, int width, cudaTextureObject_t texInput2d_obj)
-#endif
 	{
 		for (int x = blockIdx.x * blockDim.x + threadIdx.x;
 			x < width;
@@ -161,3 +123,4 @@ namespace gtom
 		}
 	}
 }
+
