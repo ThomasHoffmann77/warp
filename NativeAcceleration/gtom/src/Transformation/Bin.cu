@@ -122,7 +122,7 @@ namespace gtom
 			id < elements;
 			id += blockDim.x * gridDim.x)
 		{
-			tfloat binsum = 0;
+			tfloat binsum = (tfloat)0;
 			for (int i = 0; i < binsize; i++)
 				binsum += d_input[id * binsize + i];
 			d_output[id] = binsum / (tfloat)binsize;
@@ -139,25 +139,23 @@ namespace gtom
 
 	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize)
 	{
-		int x = threadIdx.x + blockIdx.x * blockDim.x;
-		if (x >= binnedwidth)
-			return;
-
-		for (int y = 0; y < binnedheight; y++)
+		int binvolume = binsize * binsize * binsize;
+		for (int x = blockIdx.x * blockDim.x + threadIdx.x;
+			x < binnedwidth;
+			x += blockDim.x * gridDim.x)
 		{
-			tfloat binsum = 0;
-			int binvolume = 0;
-			for (int dz = 0; dz < binsize; dz++)
-				for (int dy = 0; dy < binsize; dy++)
+			tfloat binsum = (tfloat)0;
+			for (int bz = 0; bz < binsize; bz++)
+			{
+				int offsetz = blockIdx.z * binsize + bz;
+				for (int by = 0; by < binsize; by++)
 				{
-					int xi = x * binsize + dz;
-					int yi = y * binsize + dy;
-					if (xi < width && yi < height)
-					{
-						binsum += d_input[yi * width + xi];
-						binvolume++;
-					}
+					int offsety = blockIdx.y * binsize + by;
+					for (int bx = 0; bx < binsize; bx++)
+						binsum += d_input[(offsetz * height + offsety) * width + x * binsize + bx];
 				}
+			}
+
 			d_output[(blockIdx.z * binnedheight + blockIdx.y) * binnedwidth + x] = binsum / (tfloat)binvolume;
 		}
 	}
