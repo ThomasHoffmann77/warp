@@ -9,22 +9,8 @@ namespace gtom
 	//CUDA kernel declarations//
 	////////////////////////////
 
-	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center
-#if __CUDACC_VER_MAJOR__ >= 12
-		, cudaTextureObject_t texIrregularSphereRadius2d_obj
-#endif
-	);
+	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center, cudaTextureObject_t texIrregularSphereRadius2d_obj);
 
-	///////////
-	//Globals//
-	///////////
-
-#if __CUDACC_VER_MAJOR__ < 12
-	static texture<tfloat, 2, cudaReadModeElementType> texIrregularSphereRadius2d;  //added static in order to allow parallel builds
-	#define TEX_RADIUS(phi, theta) tex2D(texIrregularSphereRadius2d, phi, theta)
-#else
-	#define TEX_RADIUS(phi, theta) tex2D<tfloat>(texIrregularSphereRadius2d_obj, phi, theta)
-#endif
 
 	////////////////
 	//Host methods//
@@ -44,26 +30,11 @@ namespace gtom
 		d_pitched = (tfloat*)CudaMallocAligned2D(anglesteps.x * sizeof(tfloat), anglesteps.y, &pitchedwidth);
 		for (int y = 0; y < anglesteps.y; y++)
 			cudaMemcpy((char*)d_pitched + y * pitchedwidth,
-				d_radiusmap + y * anglesteps.x,
-				anglesteps.x * sizeof(tfloat),
-				cudaMemcpyDeviceToDevice);
+			d_radiusmap + y * anglesteps.x,
+			anglesteps.x * sizeof(tfloat),
+			cudaMemcpyDeviceToDevice);
 
-#if __CUDACC_VER_MAJOR__ < 12
-		texIrregularSphereRadius2d.normalized = true;
-		texIrregularSphereRadius2d.filterMode = cudaFilterModeLinear;
-		texIrregularSphereRadius2d.addressMode[0] = cudaAddressModeMirror;
-		texIrregularSphereRadius2d.addressMode[1] = cudaAddressModeMirror;
-
-		cudaChannelFormatDesc desc = cudaCreateChannelDesc<tfloat>();
-		cudaBindTexture2D(NULL,
-			texIrregularSphereRadius2d,
-			d_pitched,
-			desc,
-			anglesteps.x,
-			anglesteps.y,
-			pitchedwidth);
-#else
-		//CUDA >=12 texture object setup
+		//CUDA texture object setup (replaces legacy texture binding)
 		cudaResourceDesc resDesc{};
 		resDesc.resType = cudaResourceTypePitch2D;
 		resDesc.res.pitch2D.devPtr = d_pitched;
@@ -81,46 +52,28 @@ namespace gtom
 
 		cudaTextureObject_t texIrregularSphereRadius2d_obj;
 		cudaCreateTextureObject(&texIrregularSphereRadius2d_obj, &resDesc, &texDesc, nullptr);
-#endif
 
 		tfloat3 _center = center != NULL ? *center : tfloat3(dims.x / 2, dims.y / 2, dims.z / 2);
 
 		int TpB = min(NextMultipleOf(dims.x, 32), 256);
 		dim3 grid = dim3(dims.y, dims.z, batch);
 		if (DimensionCount(dims) <= 2)
-			IrregularSphereMaskKernel<T, 2> << <grid, TpB >> > (d_input, d_output, dims, sigma, _center
-#if __CUDACC_VER_MAJOR__ >= 12
-				, texIrregularSphereRadius2d_obj
-#endif
-				);
+			IrregularSphereMaskKernel<T, 2> << <grid, TpB >> > (d_input, d_output, dims, sigma, _center, texIrregularSphereRadius2d_obj);
 		else
-			IrregularSphereMaskKernel<T, 3> << <grid, TpB >> > (d_input, d_output, dims, sigma, _center
-#if __CUDACC_VER_MAJOR__ >= 12
-				, texIrregularSphereRadius2d_obj
-#endif
-				);
+			IrregularSphereMaskKernel<T, 3> << <grid, TpB >> > (d_input, d_output, dims, sigma, _center, texIrregularSphereRadius2d_obj);
 
-#if __CUDACC_VER_MAJOR__ < 12
-		//Unbind texture
-		cudaUnbindTexture(texIrregularSphereRadius2d);
-#else
-		//Destroy texture object
+		//Destroy texture object (replaces cudaUnbindTexture)
 		cudaDestroyTextureObject(texIrregularSphereRadius2d_obj);
-#endif
 		cudaFree(d_pitched);
 	}
-
 	template void d_IrregularSphereMask<tfloat>(tfloat* d_input, tfloat* d_output, int3 dims, tfloat* d_radiusmap, int2 anglesteps, tfloat sigma, tfloat3* center, int batch);
+
 
 	////////////////
 	//CUDA kernels//
 	////////////////
 
-	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center
-#if __CUDACC_VER_MAJOR__ >= 12
-		, cudaTextureObject_t texIrregularSphereRadius2d_obj
-#endif
-	)
+	template <class T, int ndims> __global__ void IrregularSphereMaskKernel(T* d_input, T* d_output, int3 dims, tfloat sigma, tfloat3 center, cudaTextureObject_t texIrregularSphereRadius2d_obj)
 	{
 		if (threadIdx.x >= dims.x)
 			return;
@@ -149,7 +102,10 @@ namespace gtom
 			float theta = acos((float)(-direction.x));
 			float phi = atan2((float)direction.y / sin(theta), (float)direction.z / sin(theta));
 
-			tfloat radius = TEX_RADIUS(phi, theta);
+			theta /= PI * 0.5f;
+			phi /= PI2;
+
+			tfloat radius = tex2D<tfloat>(texIrregularSphereRadius2d_obj, phi, theta);
 
 			if (length < radius)
 				maskvalue = 1;
