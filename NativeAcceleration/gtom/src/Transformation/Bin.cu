@@ -19,7 +19,7 @@ namespace gtom
 	{
 		for (int b = 0; b < batch; b++)
 		{
-			tfloat* d_intermediate = NULL;
+			tfloat* d_intermediate = nullptr;
 
 			if (dims.z <= 1 && dims.y <= 1)	//1D
 			{
@@ -30,7 +30,11 @@ namespace gtom
 				size_t elements = dims.x;
 				size_t binnedelements = dims.x / (1 << bincount);
 
-				Bin1DKernel<<<grid, (uint)TpB>>>(d_input + elements * b, d_output + binnedelements * b, dims.x / (1 << bincount), 1 << bincount);
+				Bin1DKernel<<<grid, TpB>>>(d_input + elements * b,
+					d_output + binnedelements * b,
+					dims.x / (1 << bincount),
+					1 << bincount);
+
 				cudaError_t err = cudaGetLastError();
 				if (err != cudaSuccess) {
 					fprintf(stderr, "Fatal error: Bin1DKernel launch failed: %s\n", cudaGetErrorString(err));
@@ -47,7 +51,7 @@ namespace gtom
 
 				for (int i = 0; i < bincount; i++)
 				{
-					tfloat* d_result;
+					tfloat* d_result = nullptr;
 					if (i < bincount - 1)
 						cudaMalloc((void**)&d_result, dims.x / (2 << i) * dims.y / (2 << i) * sizeof(tfloat));
 					else
@@ -56,7 +60,7 @@ namespace gtom
 					cudaTextureObject_t texInput2d_obj;
 					cudaResourceDesc resDesc{};
 					resDesc.resType = cudaResourceTypePitch2D;
-					resDesc.res.pitch2D.devPtr = i == 0 ? d_input + elements * b : d_intermediate;
+					resDesc.res.pitch2D.devPtr = (i == 0 ? d_input + elements * b : d_intermediate);
 					resDesc.res.pitch2D.pitchInBytes = (dims.x / (2 << i)) * sizeof(tfloat);
 					resDesc.res.pitch2D.width = dims.x / (2 << i);
 					resDesc.res.pitch2D.height = dims.y / (2 << i);
@@ -77,9 +81,10 @@ namespace gtom
 
 					int TpB = min(256, dims.x / (2 << i));
 					int totalblocks = min((dims.x / (2 << i) + TpB - 1) / TpB, 32768);
-					dim3 grid = dim3((uint)totalblocks, dims.y / (2 << i));
+					dim3 grid(totalblocks, dims.y / (2 << i));
 
-					Bin2DKernel<tfloat><<<grid, (uint)TpB>>>(d_result, dims.x / (2 << i), texInput2d_obj);
+					Bin2DKernel<tfloat><<<grid, TpB>>>(d_result, dims.x / (2 << i), texInput2d_obj);
+
 					err = cudaGetLastError();
 					if (err != cudaSuccess) {
 						fprintf(stderr, "Fatal error: Bin2DKernel launch failed: %s\n", cudaGetErrorString(err));
@@ -89,12 +94,11 @@ namespace gtom
 					err = cudaDestroyTextureObject(texInput2d_obj);
 					if (err != cudaSuccess) {
 						fprintf(stderr, "Warning: Failed to destroy texture object: %s\n", cudaGetErrorString(err));
-						// continue, destruction failure is not fatal
 					}
 
 					if (d_result != d_output + binnedelements * b)
 					{
-						if (d_intermediate != NULL)
+						if (d_intermediate != nullptr)
 							cudaFree(d_intermediate);
 						d_intermediate = d_result;
 					}
@@ -109,13 +113,14 @@ namespace gtom
 				size_t elements = dims.x * dims.y * dims.z;
 				size_t binnedelements = dims.x * dims.y * dims.z / (1 << (bincount * 3));
 
-				Bin3DKernel<<<grid, (uint)TpB>>>(d_input + elements * b,
+				Bin3DKernel << <grid, (uint)TpB >> > (d_input + elements * b,
 					d_output + binnedelements * b,
 					dims.x,
 					dims.y,
 					dims.x / (1 << bincount),
 					dims.y / (1 << bincount),
 					1 << bincount);
+
 				cudaError_t err = cudaGetLastError();
 				if (err != cudaSuccess) {
 					fprintf(stderr, "Fatal error: Bin3DKernel launch failed: %s\n", cudaGetErrorString(err));
@@ -123,7 +128,7 @@ namespace gtom
 				}
 			}
 
-			if (d_intermediate != NULL)
+			if (d_intermediate != nullptr)
 				cudaFree(d_intermediate);
 		}
 	}
@@ -152,12 +157,11 @@ namespace gtom
 			x < width;
 			x += blockDim.x * gridDim.x)
 			d_output[blockIdx.y * width + x] = tex2D<T>(texInput2d_obj, x * 2 + 1, blockIdx.y * 2 + 1);
-		}
 	}
 
 	__global__ void Bin3DKernel(tfloat* d_input, tfloat* d_output, int width, int height, int binnedwidth, int binnedheight, int binsize)
 	{
-		int binvolume = binsize * binsize * binsize;
+		tfloat binvolume = binsize * binsize * binsize;
 		for (int x = blockIdx.x * blockDim.x + threadIdx.x;
 			x < binnedwidth;
 			x += blockDim.x * gridDim.x)
@@ -178,10 +182,4 @@ namespace gtom
 		}
 	}
 
-	// ---------------------------
-	// Explicit template instantiation (optional)
-	// ---------------------------
-	template __global__ void Bin2DKernel<tfloat>(tfloat* d_output, int width, cudaTextureObject_t texInput2d_obj);
-
 } // namespace gtom
-
