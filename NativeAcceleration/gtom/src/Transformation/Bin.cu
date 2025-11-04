@@ -49,7 +49,7 @@ namespace gtom
 				{
 					tfloat* d_result;
 					if (i < bincount - 1)
-						cudaMalloc((void**)&d_result, dims.x / (2 << i) * dims.y / (2 << i) * sizeof(T));
+						cudaMalloc((void**)&d_result, dims.x / (2 << i) * dims.y / (2 << i) * sizeof(tfloat));
 					else
 						d_result = d_output + binnedelements * b;
 
